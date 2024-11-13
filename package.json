@@ -1,0 +1,24 @@
+{
+  "name": "capstone-new",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@google-cloud/storage": "^7.14.0",
+    "@hapi/hapi": "^21.3.12",
+    "bcrypt": "^5.1.1",
+    "dotenv": "^16.4.5",
+    "joi": "^17.13.3",
+    "mime-db": "^1.53.0",
+    "mysql2": "^3.11.4",
+    "nanoid": "^3.3.7",
+    "nodemon": "^3.1.7"
+  },
+  "scripts": {
+    "start-pro": "NODE_ENV=production node ./src/server.js",
+    "start": "nodemon ./src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}
