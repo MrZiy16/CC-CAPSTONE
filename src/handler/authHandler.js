@@ -1,43 +1,19 @@
-// handlers/authHandler.js
 const bcrypt = require('bcrypt');
-const Joi = require('joi');
+const Joi = require('joi'); // Memanggil modul Joi
 const db = require('../db');
-const { Storage } = require('@google-cloud/storage');
-
-// Konfigurasi Google Cloud Storage
-const storage = new Storage({
-    projectId: 'your-project-id',
-    keyFilename: 'path/to/your-service-account.json'
-});
-const bucketName = 'your-bucket-name';
-const bucket = storage.bucket(bucketName);
-
-// Fungsi untuk mengupload gambar dan mengembalikan URL
-const uploadImage = async (file) => {
-    const { filename, data } = file;
-    const uniqueFilename = `${Date.now()}-${filename}`;
-    const fileUpload = bucket.file(uniqueFilename);
-
-    await fileUpload.save(data, {
-        resumable: false,
-        contentType: file.mimetype,
-        public: true,
-    });
-
-    return `https://storage.googleapis.com/${bucketName}/${uniqueFilename}`;
-};
 
 // Handler untuk registrasi
 const registerUser = async (request, h) => {
-    const { username, email, password } = request.payload;
+    const { username, email, password, role } = request.payload;
 
     // Validasi input
     const schema = Joi.object({
-        username: Joi.string().required(),
-        email: Joi.string().email().required(),
-        password: Joi.string().min(6).required(),
+        username: Joi.string().max(50).required(),
+        email: Joi.string().email().max(50).required(),
+        password: Joi.string().min(6).max(100).required(),
+        role: Joi.string().valid('guru', 'murid').required(),
     });
-    const { error } = schema.validate({ username, email, password });
+    const { error } = schema.validate({ username, email, password, role });
     if (error) {
         return h.response({ error: error.details[0].message }).code(400);
     }
@@ -59,8 +35,8 @@ const registerUser = async (request, h) => {
     // Simpan ke database
     try {
         await db.query(
-            'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
-            [username, email, hashedPassword]
+            'INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, ?)',
+            [username, email, hashedPassword, role]
         );
         return h.response({ message: 'User registered successfully' }).code(201);
     } catch (err) {
@@ -96,36 +72,10 @@ const loginUser = async (request, h) => {
             return h.response({ error: 'Invalid password' }).code(401);
         }
 
-        return h.response({ message: 'Login successful', userId: user.id }).code(200);
+        return h.response({ message: 'Login successful', userId: user.id, role: user.role }).code(200);
     } catch (err) {
         return h.response({ error: err.message }).code(500);
     }
 };
 
-// Handler untuk memperbarui foto profil
-const uploadPhoto = async (request, h) => {
-    const { userId } = request.auth.credentials; // ID pengguna dari token auth (asumsi Anda menggunakan auth)
-    const file = request.payload.photo; // file gambar dari request
-
-    // Validasi input
-    const schema = Joi.object({
-        photo: Joi.any().required(),
-    });
-    const { error } = schema.validate({ photo: file });
-    if (error) {
-        return h.response({ error: error.details[0].message }).code(400);
-    }
-
-    // Upload gambar dan dapatkan URL
-    const photoUrl = await uploadImage(file);
-
-    // Update URL foto di database
-    try {
-        await db.query('UPDATE users SET photo = ? WHERE id = ?', [photoUrl, userId]);
-        return h.response({ message: 'Photo uploaded successfully', photoUrl }).code(200);
-    } catch (err) {
-        return h.response({ error: err.message }).code(500);
-    }
-};
-
-module.exports = { registerUser, loginUser, uploadPhoto };
+module.exports = { registerUser, loginUser };
