@@ -1,6 +1,6 @@
 const { registerUser, loginUser, logoutUser } = require('./handler/authHandler');
-const { getProfile, updateProfile, uploadPhoto } = require('./handler/profileHandler');
-const {inputClassCode, getUserClasses, inputTaskGuru, getClassTasks, getTaskDetail} = require('./handler/mainHandler');
+const { getProfile, updateProfile, uploadImage } = require('./handler/profileHandler');
+const {inputClassCode, getUserClasses, inputTaskGuru, getClassTasks, getTaskDetail, editTask, deleteTask, getTaskMurid, updateTaskMurid} = require('./handler/mainHandler');
 const validateToken = require('./validatetoken'); // Import middleware untuk validasi token
 
 const authRoutes = [
@@ -18,9 +18,9 @@ const authRoutes = [
 
     // Rute yang Memerlukan Token
     {
-        method: 'POST',
+        method: 'PUT',
         path: '/upload-photo-profile',
-        handler: uploadPhoto,
+        handler: uploadImage,
         options: {
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
@@ -35,12 +35,21 @@ const authRoutes = [
     },
     {
         method: 'PUT',
-        path: '/profile/{id}',
+        path: '/profile',
         handler: updateProfile,
         options: {
+            payload: {
+                output: 'stream',
+                parse: true,
+                allow: 'multipart/form-data',
+                multipart: {
+                    output: 'stream',
+                },
+            },
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
     },
+    
     {
         method: 'POST',
         path: '/logout',
@@ -84,13 +93,64 @@ const authRoutes = [
 
     {
         method: 'POST',
-        path: '/class/{classId}/addtasks',  
+        path: '/class/{classId}/add-tasks',  
         handler: inputTaskGuru,
         options: {
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
+    },
+    {
+        method: 'PUT',
+        path: '/class/{classId}/tasks/{taskId}',
+        handler: editTask,
+        options: {
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
     }
-                     
+,
+    {
+        method: 'DELETE',
+        path: '/class/{classId}/tasks/{taskId}',
+        handler: deleteTask,
+        options: {
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
+    },
+    // ROUTES UNTUK MURID
+    
+    {
+        method: 'GET',
+        path: '/tasks-murid',
+        handler: getTaskMurid,
+        options: {
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
+    },
+    {
+        method: 'GET',
+        path: '/tasks-murid/{taskId}',
+        handler: getTaskDetail,
+        options: {
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
+    },
+    {
+        method: 'PUT',
+        path: '/tasks-murid/{taskId}/update',
+        handler: updateTaskMurid,
+        options: {
+            payload: {
+                output: 'stream',
+                maxBytes: 20 * 1024 * 1024,
+                parse: true,
+                allow: 'multipart/form-data',
+                multipart: {
+                    output: 'stream',
+                },
+            },
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
+    }
   
 ];
 

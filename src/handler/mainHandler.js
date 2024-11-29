@@ -3,6 +3,9 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const JWT_SECRET = process.env.JWT_SECRET;
 const db = require('../db');
+const { Storage } = require('@google-cloud/storage');
+const path = require('path');
+const fs = require('fs').promises;
 
 // Validation schema for class code
 const inputSchema = Joi.object({
@@ -18,59 +21,62 @@ const inputClassCode = async (request, h) => {
         }
 
         const { classCode } = value;
-        const { userId } = request.auth.credentials;
+        const { userId, role } = request.auth.credentials;
 
         // Get existing class data with the same code to check validity and get the name
         const [existingClasses] = await db.query(
-            'SELECT * FROM class WHERE code = ?',
-            [classCode]
+            'SELECT * FROM class WHERE code_teacher = ? OR code_student = ?',
+            [classCode, classCode]
         );
 
         if (existingClasses.length === 0) {
             return h.response({ error: 'Class code is invalid' }).code(404);
         }
 
-        // Get the name from existing class with the same code
-        const className = existingClasses[0].name;
+        const classData = existingClasses[0];
+        const className = classData.name;
 
-        // Check if user is already registered in this class using the User_Class table
+        // Validate role based on the code type
+        if (
+            (classCode === classData.code_teacher && role !== 'guru')
+        ) {
+            return h.response({
+                error: 'Your role does not match the class code',
+            }).code(403);
+        }
+
+        // Check if user is already registered in this class
         const [userClassEntry] = await db.query(
-            'SELECT * FROM User_Class WHERE class_id = (SELECT id FROM class WHERE code = ?) AND user_id = ?',
-            [classCode, userId]
+            'SELECT * FROM User_Class WHERE class_id = ? AND user_id = ?',
+            [classData.id, userId]
         );
 
         if (userClassEntry.length > 0) {
-            return h.response({ 
-                error: 'You are already registered in this class' 
+            return h.response({
+                error: 'You are already registered in this class',
             }).code(400);
         }
 
         // Insert new entry into User_Class to link the user to the class
-        const [classEntry] = await db.query(
-            'SELECT id FROM class WHERE code = ?',
-            [classCode]
-        );
-
-        const classId = classEntry[0].id;
-
         await db.query(
             'INSERT INTO User_Class (user_id, class_id) VALUES (?, ?)',
-            [userId, classId]
+            [userId, classData.id]
         );
 
-        // Get the newly created class data for response
+        // Respond with success message and class details
         return h.response({
             message: 'Successfully entered the class',
-            class: { code: classCode, name: className }
+            class: { code: classCode, name: className },
         }).code(200);
 
     } catch (err) {
         console.error('Error:', err);
-        return h.response({ 
-            error: 'An error occurred while processing your request' 
+        return h.response({
+            error: 'An error occurred while processing your request',
         }).code(500);
     }
 };
+
 
 // Fetching all classes the user belongs to
 const getUserClasses = async (request, h) => {
@@ -78,7 +84,8 @@ const getUserClasses = async (request, h) => {
 
     try {
         // Query to fetch all classes the user belongs to
-        const [rows] = await db.query(
+        const [rows] = await db.query( 
+            'SELECT id, name FROM class WHERE id IN (SELECT class_id FROM user_class)',
             [userId]
         );
 
@@ -119,7 +126,7 @@ const getClassTasks = async (request, h) => {
 
         // Step 3: Query to fetch tasks for the class
         const [rows] = await db.query(
-            'SELECT title,description,deadline FROM task WHERE class_id = ?',
+            'SELECT * FROM task WHERE class_id = ?',
             [classId]
         );
 
@@ -143,22 +150,23 @@ const getClassTasks = async (request, h) => {
 };
 
 
-// Validation schema for task creation
+// Schema sederhana untuk validasi input tugas
 const taskSchema = Joi.object({
     title: Joi.string().max(30).required(),
     description: Joi.string().max(255).required(),
     type: Joi.string().valid('individu', 'kelas').required(),
-    priority: Joi.number().integer().min(1).max(5).required(),
-    progress: Joi.number().integer().min(0).max(100).required(),
+    mapel: Joi.string().max(30).required(),
+    catagory: Joi.string().max(30).required(),
     deadline: Joi.date().required(),
 });
 
+
 const inputTaskGuru = async (request, h) => {
     try {
-        const { userId } = request.auth.credentials;
+        const { userId, role } = request.auth.credentials;
         let { classId } = request.params; // Check for classId in the URL
 
-        // If classId is not in the URL, fetch the user's classId
+        // Fetch classId if not provided in the URL
         if (!classId) {
             const [userClassEntry] = await db.query(
                 'SELECT class_id FROM user_class WHERE user_id = ? LIMIT 1',
@@ -172,15 +180,24 @@ const inputTaskGuru = async (request, h) => {
             classId = userClassEntry[0].class_id;
         }
 
-        const { title, description, type, priority, progress, deadline } = request.payload;
+        let { title, description, type, mapel, deadline, catagory } = request.payload;
+
+        // Automatically set task type based on user role
+        if (role === 'guru') {
+            type = 'kelas'; // Guru can only create tasks for classes
+        } else if (role === 'murid') {
+            type = 'individu'; // Murid can only create individual tasks
+        } else {
+            return h.response({ error: 'Invalid user role' }).code(403);
+        }
 
         // Validate task input
-        const { error, value } = taskSchema.validate({
+        const { error } = taskSchema.validate({
             title,
             description,
             type,
-            priority,
-            progress,
+            mapel,
+            catagory,
             deadline,
         });
 
@@ -190,13 +207,13 @@ const inputTaskGuru = async (request, h) => {
 
         // Insert new task into the database
         await db.query(
-            'INSERT INTO task (title, description, type,priority, progress, deadline, class_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [title, description, type, priority, progress, deadline, classId, userId]
+            'INSERT INTO task (title, description, type, mapel, catagory, deadline, class_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [title, description, type, mapel, catagory, deadline, classId, userId]
         );
 
         // Get the newly created task data for response
         const [newTaskData] = await db.query(
-            'SELECT title, description, type, priority, progress, deadline FROM task WHERE id = LAST_INSERT_ID()'
+            'SELECT title, description, type, mapel, catagory, deadline FROM task WHERE id = LAST_INSERT_ID()'
         );
 
         return h.response({
@@ -209,23 +226,40 @@ const inputTaskGuru = async (request, h) => {
     }
 };
 
-const getTaskDetail = async (request, h) => {
-    const { taskId } = request.params;
 
+
+const getTaskDetail = async (request, h) => {
     try {
-        // Fetch task detail from database
-        const [rows] = await db.query(
-            'SELECT title, description, type, start_time, end_time, priority, progress, deadline FROM task WHERE id = ?',
-            [taskId]
-        );
+        // Query untuk mengambil data tugas dan pengguna dengan progress = 2
+        const [rows] = await db.query(`
+            SELECT 
+                task.id AS task_id,
+                task.title,
+                task.description,
+                task.type,
+                task_user.start_time,
+                task_user.end_time,
+                task.priority,
+                task_user.progress AS task_progress,
+                task.deadline,
+                users.id AS user_id,
+                users.username AS user_name,
+                task_user.progress AS user_progress,
+                task_user.start_time AS user_start_time,
+                task_user.end_time AS user_end_time
+            FROM task
+            INNER JOIN task_user ON task.id = task_user.task_id
+            INNER JOIN users ON task_user.user_id = users.id
+            WHERE task_user.progress = 2
+        `);
 
         if (rows.length === 0) {
-            return h.response({ error: 'Task not found' }).code(404);
+            return h.response({ message: 'No tasks found with progress = 2' }).code(404);
         }
 
-        // Return the task detail
+        // Mengembalikan data
         return h.response({
-            message: 'Task detail retrieved successfully',
+            message: 'Tasks with progress = 2 retrieved successfully',
             data: rows,
         }).code(200);
     } catch (err) {
@@ -235,10 +269,209 @@ const getTaskDetail = async (request, h) => {
 };
 
 
+const editTask = async (request, h) => {
+    const { taskId } = request.params;
+
+    try {
+        // Validate task input
+        const { error, value } = taskSchema.validate(request.payload);
+
+        if (error) {
+            return h.response({ error: error.details[0].message }).code(400);
+        }
+
+        // Update task in the database
+        await db.query(
+            'UPDATE task SET title = ?, description = ?, mapel = ?,catagory = ?, deadline = ? WHERE id = ?',
+            [
+                value.title,
+                value.description,
+                value.mapel,
+                value.catagory,
+                value.deadline,
+                taskId,
+            ]
+        );
+
+        // Get the updated task data for response
+        const [updatedTaskData] = await db.query(
+            'SELECT title, description, mapel, catagory, deadline FROM task WHERE id = ?',
+            [taskId]
+        );
+
+        return h.response({
+            message: 'Task updated successfully',
+            data: updatedTaskData,
+        }).code(200);
+    } catch (err) {
+        console.error('Error:', err);
+        return h.response({ error: 'An error occurred while processing your request' }).code(500);
+    }
+};
+
+const deleteTask = async (request, h) => {
+    const { taskId } = request.params;
+
+    try {
+        // Delete task from database
+        await db.query(
+            'DELETE FROM task WHERE id = ?',
+            [taskId]
+        );
+
+        return h.response({
+            message: 'Task deleted successfully',
+        }).code(200);
+    } catch (err) {
+        console.error('Error:', err);
+        return h.response({ error: 'An error occurred while processing your request' }).code(500);
+    }
+};
+/******************************************************HANDLER BUAT MURID DIBAWAH***************************************************/
+const getTaskMurid = async (request, h) => {
+    try {
+        const { userId } = request.auth.credentials;
+
+        // Query untuk mengambil tugas berdasarkan user ID
+        const [rows] = await db.query(
+          `
+            SELECT 
+                t.id AS task_id,
+                t.title,
+                t.description,
+                t.type,
+                t.created_by,
+                t.class_id,
+                t.deadline,
+                t.catagory,
+                t.mapel
+            FROM task t
+            WHERE 
+                (t.type = 'individu' AND t.created_by = ?) -- Task individu hanya pembuat
+                OR (
+                    t.type = 'kelas' 
+                    AND t.class_id IN (SELECT class_id FROM user_class WHERE user_id = ?) -- Task kelas untuk anggota kelas
+                )
+            `,
+            [userId, userId]
+        );
+
+        if (rows.length === 0) {
+            return h.response({ message: 'No tasks found for this user' }).code(404);
+        }
+
+        // Mengembalikan daftar tugas
+        return h.response({
+            message: 'Tasks retrieved successfully',
+            data: rows,
+        }).code(200);
+    } catch (err) {
+        console.error('Error:', err);
+        return h.response({ error: 'An error occurred while processing your request' }).code(500);
+    }
+};
+const storage = new Storage({
+    projectId: process.env.GCLOUD_PROJECT_ID, // Ambil dari .env
+});
+const bucketName = process.env.GCLOUD_BUCKET_NAME; // Ambil dari .env
+const bucket = storage.bucket(bucketName);
+const uploadImage = async (file) => {
+    if (!file || !file._data || !file.hapi.filename) {
+        throw new Error('File data is missing or invalid');
+    }
+
+    const uniqueFilename = `${Date.now()}-${file.hapi.filename}`;
+    const fileUpload = bucket.file(uniqueFilename);
+
+    await fileUpload.save(file._data, {
+        resumable: false,
+        contentType: file.hapi.headers['content-type'], // Pastikan content-type diambil dari headers
+        public: true,
+    });
+
+    return `https://storage.googleapis.com/${bucketName}/${uniqueFilename}`;
+};
+const updateTaskMurid = async (request, h) => {
+    const { taskId } = request.params; // Get task_id from URL parameter
+    const { userId } = request.auth.credentials; // Get user_id from authentication
+
+    try {
+        // Validate payload without task_id and user_id
+        const taskSchema = Joi.object({
+            progress: Joi.string().valid('0', '1', '2').required(),
+            start_time: Joi.date().required(),
+            end_time: Joi.date().allow(null),
+            upload_file: Joi.any().optional(), // Add upload_file field validation
+        });
+        const { error, value } = taskSchema.validate(request.payload);
+        // If validation fails
+        if (error) {
+            return h.response({ error: error.details[0].message }).code(400);
+        }
+
+        // Check if task already exists in the database for this user
+        const [existingTask] = await db.query(
+            'SELECT * FROM task_user WHERE task_id = ? AND user_id = ?',
+            [taskId, userId]
+        );
+
+        // Handle file upload
+        let fileUrl = null;
+        if (request.payload.upload_file && request.payload.upload_file._data) {
+            // Assuming uploadImage handles file upload and returns the URL
+            fileUrl = await uploadImage(request.payload.upload_file);
+        }
+
+        if (existingTask.length === 0) {
+            // If task doesn't exist, insert a new one
+            await db.query(
+                'INSERT INTO task_user (task_id, user_id, progress, start_time, end_time) VALUES (?, ?, ?, ?, ?)',
+                [
+                    taskId,
+                    userId,
+                    value.progress, 
+                    value.start_time,
+                    value.end_time,
+                ]
+            );
+            return h.response({
+                message: 'Task created successfully',
+            }).code(201);
+        } else {
+            // If task already exists, update it
+            await db.query(
+                'UPDATE task_user SET progress = ?, start_time = ?, end_time = ?, upload_file = ? WHERE task_id = ? AND user_id = ?',
+                [
+                    value.progress,
+                    value.start_time,
+                    value.end_time,
+                    fileUrl || existingTask[0].upload_file, // Retain existing file URL if no new file
+                    taskId,
+                    userId,
+                ]
+            );
+            return h.response({
+                message: 'Task updated successfully',
+            }).code(200);
+        }
+    } catch (err) {
+        console.error('Error:', err);
+        return h.response({ error: 'An error occurred while processing your request' }).code(500);
+    }
+};
+
+
+
+
+
 module.exports = {
     inputTaskGuru,
     inputClassCode,
     getUserClasses,
     getClassTasks,
     getTaskDetail,
+    editTask,
+    deleteTask,
+    getTaskMurid,
+    updateTaskMurid
 };

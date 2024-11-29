@@ -7,20 +7,22 @@ require('dotenv').config(); // Untuk membaca konfigurasi
 // Konfigurasi Google Cloud Storage
 const storage = new Storage({
     projectId: process.env.GCLOUD_PROJECT_ID, // Ambil dari .env
-    keyFilename: process.env.GCLOUD_KEYFILE_PATH, // Ambil dari .env
 });
 const bucketName = process.env.GCLOUD_BUCKET_NAME; // Ambil dari .env
 const bucket = storage.bucket(bucketName);
 
 // Fungsi untuk mengupload gambar dan mengembalikan URL
 const uploadImage = async (file) => {
-    const { filename, data } = file;
-    const uniqueFilename = `${Date.now()}-${filename}`;
+    if (!file || !file._data || !file.hapi.filename) {
+        throw new Error('File data is missing or invalid');
+    }
+
+    const uniqueFilename = `${Date.now()}-${file.hapi.filename}`;
     const fileUpload = bucket.file(uniqueFilename);
 
-    await fileUpload.save(data, {
+    await fileUpload.save(file._data, {
         resumable: false,
-        contentType: file.mimetype,
+        contentType: file.hapi.headers['content-type'], // Pastikan content-type diambil dari headers
         public: true,
     });
 
@@ -54,6 +56,7 @@ const getProfile = async (request, h) => {
 const updateProfile = async (request, h) => {
     const { userId } = request.auth.credentials; // Ambil `userId` dari JWT
     const { username, email, currentPassword, newPassword } = request.payload;
+    const file = request.payload.photo; // Foto profil dari request
 
     // Validasi input
     const schema = Joi.object({
@@ -61,9 +64,10 @@ const updateProfile = async (request, h) => {
         email: Joi.string().email().optional(),
         currentPassword: Joi.string().min(6).optional(),
         newPassword: Joi.string().min(6).optional(),
-    }).with('newPassword', 'currentPassword'); // Jika `newPassword` ada, `currentPassword` harus ada
+        photo: Joi.any().optional(),
+    }).with('newPassword', 'currentPassword');
 
-    const { error } = schema.validate({ username, email, currentPassword, newPassword });
+    const { error } = schema.validate({ username, email, currentPassword, newPassword, photo: file });
     if (error) {
         return h.response({ error: error.details[0].message }).code(400);
     }
@@ -104,6 +108,12 @@ const updateProfile = async (request, h) => {
             }
         }
 
+        // Upload foto jika ada
+        let photoUrl = existingUser[0].photo; // Tetap gunakan URL foto lama jika tidak ada file baru
+        if (file && file._data) {
+            photoUrl = await uploadImage(file);
+        }
+
         // Build query untuk update
         let updateQuery = 'UPDATE users SET ';
         const updateValues = [];
@@ -122,6 +132,11 @@ const updateProfile = async (request, h) => {
             const hashedNewPassword = await bcrypt.hash(newPassword, 10);
             updateQuery += 'password = ?, ';
             updateValues.push(hashedNewPassword);
+        }
+
+        if (file && file._data) {
+            updateQuery += 'photo = ?, ';
+            updateValues.push(photoUrl);
         }
 
         updateQuery = updateQuery.slice(0, -2); // Hapus koma terakhir
@@ -146,36 +161,4 @@ const updateProfile = async (request, h) => {
     }
 };
 
-// Handler untuk memperbarui foto profil
-const uploadPhoto = async (request, h) => {
-    const { userId } = request.auth.credentials; // Ambil `userId` dari JWT
-    const file = request.payload.photo; // File gambar dari request
-
-    // Validasi input
-    const schema = Joi.object({
-        photo: Joi.any().required(),
-    });
-
-    const { error } = schema.validate({ photo: file });
-    if (error) {
-        return h.response({ error: error.details[0].message }).code(400);
-    }
-
-    try {
-        // Upload gambar dan dapatkan URL
-        const photoUrl = await uploadImage(file);
-
-        // Update URL foto di database
-        await db.query('UPDATE users SET photo = ? WHERE id = ?', [photoUrl, userId]);
-
-        return h.response({ message: 'Photo uploaded successfully', photoUrl }).code(200);
-    } catch (err) {
-        return h.response({ error: err.message }).code(500);
-    }
-};
-
-module.exports = {
-    getProfile,
-    updateProfile,
-    uploadPhoto,
-};
+module.exports = { getProfile, updateProfile, uploadImage };
