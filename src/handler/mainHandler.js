@@ -156,7 +156,7 @@ const taskSchema = Joi.object({
     description: Joi.string().max(255).required(),
     type: Joi.string().valid('individu', 'kelas').required(),
     mapel: Joi.string().max(30).required(),
-    catagory: Joi.string().max(30).required(),
+    category: Joi.string().max(30).required(),
     deadline: Joi.date().required(),
 });
 
@@ -172,15 +172,17 @@ const inputTaskGuru = async (request, h) => {
                 'SELECT class_id FROM user_class WHERE user_id = ? LIMIT 1',
                 [userId]
             );
-
+        
             if (!userClassEntry || userClassEntry.length === 0) {
-                return h.response({ error: 'User is not enrolled in any class' }).code(400);
+                // Set classId to null if user is not enrolled in any class
+                classId = null;
+            } else {
+                classId = userClassEntry[0].class_id;
             }
-
-            classId = userClassEntry[0].class_id;
         }
+        
 
-        let { title, description, type, mapel, deadline, catagory } = request.payload;
+        let { title, description, type, mapel, deadline, category } = request.payload;
 
         // Automatically set task type based on user role
         if (role === 'guru') {
@@ -197,7 +199,7 @@ const inputTaskGuru = async (request, h) => {
             description,
             type,
             mapel,
-            catagory,
+            category,
             deadline,
         });
 
@@ -207,13 +209,13 @@ const inputTaskGuru = async (request, h) => {
 
         // Insert new task into the database
         await db.query(
-            'INSERT INTO task (title, description, type, mapel, catagory, deadline, class_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [title, description, type, mapel, catagory, deadline, classId, userId]
+            'INSERT INTO task (title, description, type, mapel, category, deadline, class_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [title, description, type, mapel, category, deadline, classId, userId]
         );
 
         // Get the newly created task data for response
         const [newTaskData] = await db.query(
-            'SELECT title, description, type, mapel, catagory, deadline FROM task WHERE id = LAST_INSERT_ID()'
+            'SELECT title, description, type, mapel, category, deadline FROM task WHERE id = LAST_INSERT_ID()'
         );
 
         return h.response({
@@ -230,43 +232,74 @@ const inputTaskGuru = async (request, h) => {
 
 const getTaskDetail = async (request, h) => {
     try {
-        // Query untuk mengambil data tugas dan pengguna dengan progress = 2
+        // Ambil classId dan taskId dari URL
+        const { classId, taskId } = request.params;
+
+        // Jalankan query untuk mengambil detail tugas berdasarkan classId dan taskId
         const [rows] = await db.query(`
             SELECT 
                 task.id AS task_id,
                 task.title,
                 task.description,
                 task.type,
+                task.priority,
+                task.deadline,
+                task_user.user_id,
+                task_user.upload_file,
+                task_user.progress,
                 task_user.start_time,
                 task_user.end_time,
-                task.priority,
-                task_user.progress AS task_progress,
-                task.deadline,
-                users.id AS user_id,
-                users.username AS user_name,
-                task_user.progress AS user_progress,
-                task_user.start_time AS user_start_time,
-                task_user.end_time AS user_end_time
+                users.username AS user_name
             FROM task
-            INNER JOIN task_user ON task.id = task_user.task_id
-            INNER JOIN users ON task_user.user_id = users.id
-            WHERE task_user.progress = 2
-        `);
+            LEFT JOIN task_user ON task.id = task_user.task_id
+            LEFT JOIN users ON task_user.user_id = users.id
+            WHERE task.id = ? AND task.class_id = ?
+        `, [taskId, classId]); // Gunakan parameter untuk filter berdasarkan classId dan taskId
 
         if (rows.length === 0) {
-            return h.response({ message: 'No tasks found with progress = 2' }).code(404);
+            return h.response({
+                message: `No task found with class_id = ${classId} and task_id = ${taskId}`,
+                data: null,
+            }).code(404);
         }
 
-        // Mengembalikan data
+        // Gabungkan data berdasarkan taskId
+        const taskDetails = rows.reduce((acc, row) => {
+            if (!acc.task_id) {
+                acc.task_id = row.task_id;
+                acc.title = row.title;
+                acc.description = row.description;
+                acc.type = row.type;
+                acc.priority = row.priority;
+                acc.deadline = row.deadline;
+                acc.users_with_progress_2 = [];
+            }
+
+            // Tambahkan pengguna jika progress = 2
+            if (row.progress === "2") {
+                acc.users_with_progress_2.push({
+                    user_id: row.user_id,
+                    upload_file: row.upload_file,
+                    progress: row.progress,
+                    start_time: row.start_time,
+                    end_time: row.end_time,
+                    user_name: row.user_name,
+                });
+            }
+
+            return acc;
+        }, {});
+
         return h.response({
-            message: 'Tasks with progress = 2 retrieved successfully',
-            data: rows,
+            message: 'Task details retrieved successfully',
+            data: taskDetails,
         }).code(200);
     } catch (err) {
         console.error('Error:', err);
         return h.response({ error: 'An error occurred while processing your request' }).code(500);
     }
 };
+
 
 
 const editTask = async (request, h) => {
@@ -282,12 +315,12 @@ const editTask = async (request, h) => {
 
         // Update task in the database
         await db.query(
-            'UPDATE task SET title = ?, description = ?, mapel = ?,catagory = ?, deadline = ? WHERE id = ?',
+            'UPDATE task SET title = ?, description = ?, mapel = ?,category = ?, deadline = ? WHERE id = ?',
             [
                 value.title,
                 value.description,
                 value.mapel,
-                value.catagory,
+                value.category,
                 value.deadline,
                 taskId,
             ]
@@ -295,7 +328,7 @@ const editTask = async (request, h) => {
 
         // Get the updated task data for response
         const [updatedTaskData] = await db.query(
-            'SELECT title, description, mapel, catagory, deadline FROM task WHERE id = ?',
+            'SELECT title, description, mapel, category, deadline FROM task WHERE id = ?',
             [taskId]
         );
 
@@ -343,7 +376,7 @@ const getTaskMurid = async (request, h) => {
                 t.created_by,
                 t.class_id,
                 t.deadline,
-                t.catagory,
+                t.category,
                 t.mapel
             FROM task t
             WHERE 

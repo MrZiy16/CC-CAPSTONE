@@ -119,6 +119,14 @@ const authRoutes = [
     // ROUTES UNTUK MURID
     
     {
+        method: 'POST',
+        path: '/tasks-murid/add-tasks',
+        handler: inputTaskGuru,
+        options: {
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
+    },
+    {
         method: 'GET',
         path: '/tasks-murid',
         handler: getTaskMurid,
