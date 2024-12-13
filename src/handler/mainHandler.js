@@ -6,11 +6,64 @@ const db = require('../db');
 const { Storage } = require('@google-cloud/storage');
 const path = require('path');
 const fs = require('fs').promises;
+const axios = require('axios');
+
+// Validation schema for creating a class
+const createClassSchema = Joi.object({
+    name: Joi.string().required(),
+    codeTeacher: Joi.string().required(),
+    codeStudent: Joi.string().required()
+})
+const createClass = async (request, h) => {
+    try {
+        // Validate input
+        const { error, value } = createClassSchema.validate(request.payload);
+        if (error) {
+            return h.response({ error: error.details[0].message }).code(400);
+        }
+
+        const { name, codeTeacher, codeStudent } = value;  // Removed 'mapel' here
+
+        // Check if the class code already exists
+        const [existingClasses] = await db.query(
+            'SELECT * FROM class WHERE code_teacher = ? OR code_student = ?',
+            [codeTeacher, codeStudent]
+        );
+        if (existingClasses.length > 0) {
+            return h.response({ error: 'Class code already exists' }).code(409);
+        }
+
+        // Create the class (without mapel field)
+        const [result] = await db.query(
+            'INSERT INTO class (name, code_teacher, code_student) VALUES (?, ?, ?)',  // Removed 'mapel' here
+            [name, codeTeacher, codeStudent]
+        );
+
+        // Return the created class data
+        return h.response({
+            message: 'Class created successfully',
+            data: {
+                id: result.insertId,
+                name,
+                codeTeacher,
+                codeStudent,
+            },
+        }).code(201);
+    } catch (err) {
+        console.error('Error creating class:', err.message);
+        return h.response({
+            error: 'Internal Server Error',
+            details: err.message,
+        }).code(500);
+    }
+};
+
 
 // Validation schema for class code
 const inputSchema = Joi.object({
     classCode: Joi.string().required()
 });
+
 
 const inputClassCode = async (request, h) => {
     try {
@@ -47,7 +100,7 @@ const inputClassCode = async (request, h) => {
 
         // Check if user is already registered in this class
         const [userClassEntry] = await db.query(
-            'SELECT * FROM User_Class WHERE class_id = ? AND user_id = ?',
+            'SELECT * FROM user_class WHERE class_id = ? AND user_id = ?',
             [classData.id, userId]
         );
 
@@ -57,9 +110,9 @@ const inputClassCode = async (request, h) => {
             }).code(400);
         }
 
-        // Insert new entry into User_Class to link the user to the class
+        // Insert new entry into user_class to link the user to the class
         await db.query(
-            'INSERT INTO User_Class (user_id, class_id) VALUES (?, ?)',
+            'INSERT INTO user_class (user_id, class_id) VALUES (?, ?)',
             [userId, classData.id]
         );
 
@@ -85,7 +138,12 @@ const getUserClasses = async (request, h) => {
     try {
         // Query to fetch all classes the user belongs to
         const [rows] = await db.query( 
-            'SELECT id, name FROM class WHERE id IN (SELECT class_id FROM user_class)',
+            `
+            SELECT c.id, c.name, c.code_student
+            FROM class c
+            JOIN user_class uc ON c.id = uc.class_id
+            WHERE uc.user_id = ?
+            `,
             [userId]
         );
 
@@ -126,8 +184,14 @@ const getClassTasks = async (request, h) => {
 
         // Step 3: Query to fetch tasks for the class
         const [rows] = await db.query(
-            'SELECT * FROM task WHERE class_id = ?',
-            [classId]
+            `SELECT t.*,
+       IFNULL(tu.progress, '0') AS progress
+FROM task t
+LEFT JOIN task_user tu ON t.id = tu.task_id AND tu.user_id = ?
+WHERE t.class_id = ? AND (tu.user_id = ? OR tu.user_id IS NULL)
+ORDER BY COALESCE(t.priority, 9999) DESC, t.deadline ASC
+`,
+            [userId, classId, userId]
         );
 
         // Step 4: If no tasks are found, return a 404 error
@@ -150,7 +214,7 @@ const getClassTasks = async (request, h) => {
 };
 
 
-// Schema sederhana untuk validasi input tugas
+
 const taskSchema = Joi.object({
     title: Joi.string().max(30).required(),
     description: Joi.string().max(255).required(),
@@ -158,8 +222,9 @@ const taskSchema = Joi.object({
     mapel: Joi.string().max(30).required(),
     category: Joi.string().max(30).required(),
     deadline: Joi.date().required(),
+    priority: Joi.number().optional().allow(null), // Nullable field
+    reminding_time: Joi.date().optional().allow(null), // Nullable field
 });
-
 
 const inputTaskGuru = async (request, h) => {
     try {
@@ -172,7 +237,7 @@ const inputTaskGuru = async (request, h) => {
                 'SELECT class_id FROM user_class WHERE user_id = ? LIMIT 1',
                 [userId]
             );
-        
+
             if (!userClassEntry || userClassEntry.length === 0) {
                 // Set classId to null if user is not enrolled in any class
                 classId = null;
@@ -180,9 +245,8 @@ const inputTaskGuru = async (request, h) => {
                 classId = userClassEntry[0].class_id;
             }
         }
-        
 
-        let { title, description, type, mapel, deadline, category } = request.payload;
+        let { title, description, type, mapel, deadline, category, priority, reminding_time } = request.payload;
 
         // Automatically set task type based on user role
         if (role === 'guru') {
@@ -201,21 +265,39 @@ const inputTaskGuru = async (request, h) => {
             mapel,
             category,
             deadline,
+            priority,
+            reminding_time,
         });
 
         if (error) {
             return h.response({ error: error.details[0].message }).code(400);
         }
 
+        // Jika priority tidak diberikan, hitung melalui API Flask
+        if (!priority) {
+            try {
+                const flaskResponse = await axios.post('https://api-ml-dot-capstone-project-441603.as.r.appspot.com/predict', {
+                    task: category,
+                    subject: mapel,
+                    deadline: deadline,
+                });
+
+                priority = flaskResponse.data.priority_score; // Ambil nilai priority_score dari Flask
+            } catch (flaskError) {
+                console.error('Error from Flask API:', flaskError.message);
+                return h.response({ error: 'Failed to calculate priority score' }).code(500);
+            }
+        }
+
         // Insert new task into the database
         await db.query(
-            'INSERT INTO task (title, description, type, mapel, category, deadline, class_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [title, description, type, mapel, category, deadline, classId, userId]
+            'INSERT INTO task (title, description, type, mapel, category, deadline, priority, reminding_time, class_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [title, description, type, mapel, category, deadline, priority || null, reminding_time || null, classId, userId]
         );
 
         // Get the newly created task data for response
         const [newTaskData] = await db.query(
-            'SELECT title, description, type, mapel, category, deadline FROM task WHERE id = LAST_INSERT_ID()'
+            'SELECT title, description, type, mapel, category, deadline, priority, reminding_time FROM task WHERE id = LAST_INSERT_ID()'
         );
 
         return h.response({
@@ -230,65 +312,72 @@ const inputTaskGuru = async (request, h) => {
 
 
 
-const getTaskDetail = async (request, h) => {
+
+
+
+const getTaskDetailMurid = async (request, h) => {
     try {
-        // Ambil classId dan taskId dari URL
-        const { classId, taskId } = request.params;
+        const { taskId } = request.params;
+        const { userId } = request.auth.credentials;
 
-        // Jalankan query untuk mengambil detail tugas berdasarkan classId dan taskId
-        const [rows] = await db.query(`
+        // Query to get task details and progress data for all users
+        const [rows] = await db.query(
+            `
             SELECT 
-                task.id AS task_id,
-                task.title,
-                task.description,
-                task.type,
-                task.priority,
-                task.deadline,
-                task_user.user_id,
-                task_user.upload_file,
-                task_user.progress,
-                task_user.start_time,
-                task_user.end_time,
-                users.username AS user_name
-            FROM task
-            LEFT JOIN task_user ON task.id = task_user.task_id
-            LEFT JOIN users ON task_user.user_id = users.id
-            WHERE task.id = ? AND task.class_id = ?
-        `, [taskId, classId]); // Gunakan parameter untuk filter berdasarkan classId dan taskId
+                t.*,
+                tu.user_id,
+                IFNULL(tu.progress, '0') AS progress, -- Progress for users
+                tu.upload_file,
+                tu.start_time,
+                tu.end_time,
+                u.username AS user_name,
+                u.email AS user_email,
+                u.photo AS user_photo
+            FROM task t
+            LEFT JOIN task_user tu 
+                ON t.id = tu.task_id
+            LEFT JOIN users u 
+                ON tu.user_id = u.id
+            WHERE t.id = ?
+            `,
+            [taskId]
+        );
 
+        // If no data found, task not found
         if (rows.length === 0) {
             return h.response({
-                message: `No task found with class_id = ${classId} and task_id = ${taskId}`,
+                message: 'Task not found',
                 data: null,
             }).code(404);
         }
 
-        // Gabungkan data berdasarkan taskId
-        const taskDetails = rows.reduce((acc, row) => {
-            if (!acc.task_id) {
-                acc.task_id = row.task_id;
-                acc.title = row.title;
-                acc.description = row.description;
-                acc.type = row.type;
-                acc.priority = row.priority;
-                acc.deadline = row.deadline;
-                acc.users_with_progress_2 = [];
-            }
-
-            // Tambahkan pengguna jika progress = 2
-            if (row.progress === "2") {
-                acc.users_with_progress_2.push({
+        // Prepare task details
+        const taskDetails = {
+            id: rows[0].id,
+            title: rows[0].title,
+            description: rows[0].description,
+            type: rows[0].type,
+            created_by: rows[0].created_by,
+            class_id: rows[0].class_id,
+            deadline: rows[0].deadline,
+            category: rows[0].category,
+            mapel: rows[0].mapel,
+            priority: rows[0].priority || 0,
+            reminding_time: rows[0].reminding_time,
+            progress: rows.find(row => row.user_id === userId)?.progress || "0", // Progress spesifik user saat ini
+            users: rows
+                .filter(row => row.progress === "2") // Hanya yang memiliki progress "2"
+                .map(row => ({
                     user_id: row.user_id,
+                    email: row.user_email,
                     upload_file: row.upload_file,
                     progress: row.progress,
                     start_time: row.start_time,
                     end_time: row.end_time,
                     user_name: row.user_name,
-                });
-            }
-
-            return acc;
-        }, {});
+                    user_photo: row.user_photo
+                }))
+        };
 
         return h.response({
             message: 'Task details retrieved successfully',
@@ -299,6 +388,9 @@ const getTaskDetail = async (request, h) => {
         return h.response({ error: 'An error occurred while processing your request' }).code(500);
     }
 };
+
+
+
 
 
 
@@ -367,7 +459,7 @@ const getTaskMurid = async (request, h) => {
 
         // Query untuk mengambil tugas berdasarkan user ID
         const [rows] = await db.query(
-          `
+            `
             SELECT 
                 t.id AS task_id,
                 t.title,
@@ -377,17 +469,22 @@ const getTaskMurid = async (request, h) => {
                 t.class_id,
                 t.deadline,
                 t.category,
-                t.mapel
-            FROM task t
+                t.mapel,
+                IFNULL(tu.progress, '0') AS progress
+            FROM 
+                task t
+            LEFT JOIN 
+                task_user tu ON t.id = tu.task_id AND tu.user_id = ?
             WHERE 
-                (t.type = 'individu' AND t.created_by = ?) -- Task individu hanya pembuat
+                (t.type = 'individu' AND t.created_by = ?) -- Task individu hanya untuk pembuat
                 OR (
                     t.type = 'kelas' 
                     AND t.class_id IN (SELECT class_id FROM user_class WHERE user_id = ?) -- Task kelas untuk anggota kelas
                 )
             `,
-            [userId, userId]
+            [userId, userId, userId] // Masukkan userId sebanyak tiga kali sesuai parameter
         );
+        
 
         if (rows.length === 0) {
             return h.response({ message: 'No tasks found for this user' }).code(404);
@@ -424,6 +521,8 @@ const uploadImage = async (file) => {
 
     return `https://storage.googleapis.com/${bucketName}/${uniqueFilename}`;
 };
+
+
 const updateTaskMurid = async (request, h) => {
     const { taskId } = request.params; // Get task_id from URL parameter
     const { userId } = request.auth.credentials; // Get user_id from authentication
@@ -432,7 +531,7 @@ const updateTaskMurid = async (request, h) => {
         // Validate payload without task_id and user_id
         const taskSchema = Joi.object({
             progress: Joi.string().valid('0', '1', '2').required(),
-            start_time: Joi.date().required(),
+            start_time: Joi.date().allow(null),
             end_time: Joi.date().allow(null),
             upload_file: Joi.any().optional(), // Add upload_file field validation
         });
@@ -458,13 +557,12 @@ const updateTaskMurid = async (request, h) => {
         if (existingTask.length === 0) {
             // If task doesn't exist, insert a new one
             await db.query(
-                'INSERT INTO task_user (task_id, user_id, progress, start_time, end_time) VALUES (?, ?, ?, ?, ?)',
+                'INSERT INTO task_user (task_id, user_id, progress, start_time) VALUES (?, ?, ?, ?)',
                 [
                     taskId,
                     userId,
                     value.progress, 
                     value.start_time,
-                    value.end_time,
                 ]
             );
             return h.response({
@@ -473,10 +571,9 @@ const updateTaskMurid = async (request, h) => {
         } else {
             // If task already exists, update it
             await db.query(
-                'UPDATE task_user SET progress = ?, start_time = ?, end_time = ?, upload_file = ? WHERE task_id = ? AND user_id = ?',
+                'UPDATE task_user SET progress = ?, end_time = ?, upload_file = ? WHERE task_id = ? AND user_id = ?',
                 [
                     value.progress,
-                    value.start_time,
                     value.end_time,
                     fileUrl || existingTask[0].upload_file, // Retain existing file URL if no new file
                     taskId,
@@ -485,13 +582,71 @@ const updateTaskMurid = async (request, h) => {
             );
             return h.response({
                 message: 'Task updated successfully',
-            }).code(200);
+            }).code(201);
         }
     } catch (err) {
         console.error('Error:', err);
         return h.response({ error: 'An error occurred while processing your request' }).code(500);
     }
 };
+const getLeaderboard = async (request, h) => {
+    try {
+        const { classId } = request.params; // Ambil classId dari parameter URL
+
+        // Validasi jika classId tidak diberikan
+        if (!classId) {
+            return h.response({
+                status: 'fail',
+                message: 'classId is required',
+            }).code(400);
+        }
+
+        // Query untuk mendapatkan leaderboard berdasarkan classId
+        const leaderboardQuery = `
+        SELECT 
+            user_id,username,photo,
+            COUNT(task_user.task_id) AS total_tasks,
+            SUM(TIMESTAMPDIFF(HOUR, task_user.start_time, task_user.end_time)) AS total_time_hours,
+            SUM(TIMESTAMPDIFF(SECOND, task_user.start_time, task_user.end_time)) AS total_time_diff_seconds  -- Menghitung total selisih waktu dalam detik
+        FROM 
+            task_user
+        JOIN task ON task_user.task_id = task.id
+        JOIN users ON task_user.user_id = users.id
+        WHERE 
+            task.class_id = ?  -- Mengambil hanya tugas dari kelas tertentu
+            AND task_user.start_time IS NOT NULL
+            AND task_user.end_time IS NOT NULL
+            AND task_user.progress = "2"
+        GROUP BY 
+            user_id
+        ORDER BY 
+            total_tasks DESC,  -- Mengurutkan berdasarkan total tugas
+            total_time_diff_seconds ASC -- Mengurutkan berdasarkan total waktu selisih, yang lebih sedikit lebih atas
+    `;
+    
+    
+    
+
+        // Jalankan query ke database dengan parameter classId
+        const [leaderboardData] = await db.query(leaderboardQuery, [classId]);
+
+        // Return hasil leaderboard
+        return h.response({
+            status: 'success',
+            message: `Leaderboard for class ${classId} retrieved successfully`,
+            data: leaderboardData,
+        }).code(200);
+
+    } catch (err) {
+        console.error('Error retrieving leaderboard:', err);
+        return h.response({
+            status: 'fail',
+            message: 'Failed to retrieve leaderboard',
+            error: err.message,
+        }).code(500);
+    }
+};
+
 
 
 
@@ -502,9 +657,11 @@ module.exports = {
     inputClassCode,
     getUserClasses,
     getClassTasks,
-    getTaskDetail,
     editTask,
     deleteTask,
     getTaskMurid,
-    updateTaskMurid
+    updateTaskMurid,
+    createClass,
+    getTaskDetailMurid,
+    getLeaderboard
 };

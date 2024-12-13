@@ -8,7 +8,7 @@ const JWT_SECRET = process.env.JWT_SECRET; // Ambil secret dari .env
 
 const init = async () => {
   const server = Hapi.server({
-    port: 7000,
+    port: 8080,
     host: process.env.NODE_ENV !== "production" ? "localhost" : "0.0.0.0",
     routes: {
       cors: {

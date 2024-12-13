@@ -1,6 +1,6 @@
 const { registerUser, loginUser, logoutUser } = require('./handler/authHandler');
 const { getProfile, updateProfile, uploadImage } = require('./handler/profileHandler');
-const {inputClassCode, getUserClasses, inputTaskGuru, getClassTasks, getTaskDetail, editTask, deleteTask, getTaskMurid, updateTaskMurid} = require('./handler/mainHandler');
+const {inputClassCode, getUserClasses, inputTaskGuru, getClassTasks, getLeaderboard, editTask, deleteTask, getTaskMurid, updateTaskMurid, createClass,getTaskDetailMurid} = require('./handler/mainHandler');
 const validateToken = require('./validatetoken'); // Import middleware untuk validasi token
 
 const authRoutes = [
@@ -58,6 +58,13 @@ const authRoutes = [
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
     },
+
+    {
+        method: 'POST',
+        path: '/class',
+        handler: createClass,
+    },
+
     {
         method: 'POST',
         path: '/join-class',
@@ -85,7 +92,7 @@ const authRoutes = [
     {
         method: 'GET',
         path: '/class/{classId}/tasks/{taskId}',
-        handler: getTaskDetail,
+        handler: getTaskDetailMurid,
         options: {
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
@@ -137,7 +144,7 @@ const authRoutes = [
     {
         method: 'GET',
         path: '/tasks-murid/{taskId}',
-        handler: getTaskDetail,
+        handler: getTaskDetailMurid,
         options: {
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
@@ -158,7 +165,16 @@ const authRoutes = [
             },
             pre: [{ method: validateToken }], // Middleware untuk validasi token
         },
+    },
+    {
+        method: 'GET',
+        path: '/leaderboard/{classId}',
+        handler: getLeaderboard,
+        options: {
+            pre: [{ method: validateToken }], // Middleware untuk validasi token
+        },
     }
+
   
 ];
 
