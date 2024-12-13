@@ -1,0 +1,19 @@
+runtime: python39
+entrypoint: gunicorn -w 2 -b :$PORT apiml:app
+
+instance_class: F2
+resources:
+  cpu: 2
+  memory_gb: 2
+  # Pilih kelas instans yang lebih besar
+automatic_scaling:
+  min_instances: 1
+  max_instances: 5
+
+
+
+handlers:
+- url: /.*
+  script: auto
+
+service: api-ml
